@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Table Tennis</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; overflow: hidden; font-family: 'Courier New', monospace; }
+  canvas { display: block; }
+  #ui {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  #score {
+    position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+    color: #fff; font-size: 28px; font-weight: bold; letter-spacing: 4px;
+    text-shadow: 0 0 20px rgba(100,200,255,0.8);
+    font-family: 'Courier New', monospace;
+  }
+  #message {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #fff; font-size: 22px; text-align: center;
+    text-shadow: 0 0 30px rgba(100,200,255,1);
+    font-family: 'Courier New', monospace;
+    line-height: 1.8;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #message.visible { opacity: 1; }
+  #instructions {
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.4); font-size: 13px; text-align: center;
+    letter-spacing: 2px;
+  }
+  #difficulty {
+    position: absolute; top: 20px; right: 20px;
+    color: rgba(255,255,255,0.5); font-size: 13px; letter-spacing: 2px;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score">0 : 0</div>
+  <div id="message"></div>
+  <div id="instructions">MOVE MOUSE TO AIM · CLICK TO HIT</div>
+  <div id="difficulty">CPU: MEDIUM</div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+const W = canvas.width, H = canvas.height;
+
+// Game state
+let playerScore = 0, cpuScore = 0;
+let gameState = 'serve'; // serve, rally, point
+let servingPlayer = 'player';
+let messageTimer = 0;
+
+// Mouse
+let mouseX = W/2, mouseY = H/2;
+let canHit = false;
+let hitCooldown = 0;
+
+// Table perspective constants
+const TABLE_Z_NEAR = 0.3; // near edge (player side) as fraction of screen
+const TABLE_Z_FAR = 0.7;  // far edge
+
+// Paddle (player's "hand")
+const paddle = {
+  x: W/2, y: H * 0.82,
+  w: 70, h: 12,
+  tilt: 0
+};
+
+// Ball in 3D space: x(-1..1), y(0..1 where 0=table), z(0=player..1=cpu)
+const ball = {
+  x: 0, y: 0.3, z: 0.1,
+  vx: 0, vy: 0, vz: 0,
+  radius: 0.025,
+  spin: 0,
+  visible: true,
+  bounced: false // has it bounced on player side this rally?
+};
+
+// CPU paddle in 3D
+const cpu = {
+  x: 0, y: 0,
+  vx: 0,
+  reactionDelay: 0,
+  difficulty: 0.72
+};
+
+// Trail
+const trail = [];
+const MAX_TRAIL = 18;
+
+// Particles
+const particles = [];
+
+// Table glow pulse
+let glowPulse = 0;
+
+// --- Coordinate helpers ---
+function project(wx, wy, wz) {
+  // wz: 0=player end, 1=cpu end
+  // Perspective: table goes from bottom-center to upper-center
+  const perspective = 0.55 + wz * 0.45;
+  const tableLeft = W * (0.5 - 0.45 * perspective);
+  const tableRight = W * (0.5 + 0.45 * perspective);
+  const tableY = H * (TABLE_Z_NEAR + (TABLE_Z_FAR - TABLE_Z_NEAR) * (1 - wz));
+
+  const sx = tableLeft + (wx + 1) / 2 * (tableRight - tableLeft);
+  const sy = tableY - wy * H * 0.25 * perspective;
+  return { sx, sy, scale: perspective };
+}
+
+function ballScreen() {
+  return project(ball.x, ball.y, ball.z);
+}
+
+// --- Serve ---
+function serve() {
+  ball.bounced = false;
+  if (servingPlayer === 'player') {
+    ball.x = 0; ball.y = 0.25; ball.z = 0.05;
+    ball.vx = 0; ball.vy = 0; ball.vz = 0;
+    canHit = true;
+    showMessage('YOUR SERVE\nClick to serve!');
+  } else {
+    ball.x = (Math.random() - 0.5) * 0.6;
+    ball.y = 0.3; ball.z = 0.92;
+    ball.vx = (Math.random() - 0.5) * 0.018;
+    ball.vy = -0.004;
+    ball.vz = -0.018 - Math.random() * 0.008;
+    ball.spin = (Math.random() - 0.5) * 0.01;
+    canHit = false;
+    hideMessage();
+    gameState = 'rally';
+  }
+}
+
+function showMessage(txt) {
+  const el = document.getElementById('message');
+  el.innerHTML = txt.replace('\n', '<br>');
+  el.classList.add('visible');
+}
+function hideMessage() {
+  document.getElementById('message').classList.remove('visible');
+}
+function updateScore() {
+  document.getElementById('score').textContent = playerScore + ' : ' + cpuScore;
+}
+
+// --- Hit ball with paddle ---
+function playerHit() {
+  if (!canHit || hitCooldown > 0) return;
+  if (ball.z > 0.25) return; // too far
+
+  const bs = ballScreen();
+  const dx = mouseX - paddle.x;
+  const dy = mouseY - bs.sy;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  if (dist > 90) return; // missed
+
+  hitCooldown = 18;
+  canHit = false;
+  hideMessage();
+
+  // Direction based on mouse position relative to center
+  const aimX = (mouseX - W/2) / (W/2);
+  const aimY = (mouseY - H*0.5) / (H*0.5);
+
+  ball.vz = 0.022 + Math.random() * 0.006;   // positive = toward CPU
+  ball.vx = aimX * 0.022 + (Math.random() - 0.5) * 0.004;
+  ball.vy = 0.016 - aimY * 0.006;
+  ball.spin = aimX * 0.010;
+  ball.bounced = false;
+
+  spawnHitParticles(bs.sx, bs.sy, '#80cfff');
+  glowPulse = 1;
+  gameState = 'rally';
+}
+
+// --- Spawn particles ---
+function spawnHitParticles(x, y, color) {
+  for (let i = 0; i < 14; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1.5 + Math.random() * 3;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1,
+      color,
+      size: 2 + Math.random() * 3
+    });
+  }
+}
+
+// --- CPU logic ---
+let cpuHitCooldown = 0;
+function updateCPU(dt) {
+  if (cpuHitCooldown > 0) cpuHitCooldown -= dt;
+
+  // Ball travelling toward CPU (vz > 0) — track predicted landing spot
+  if (ball.vz > 0) {
+    const timeToReach = Math.max(0, (0.88 - ball.z) / ball.vz);
+    const predictX = ball.x + ball.vx * timeToReach;
+    const clampedX = Math.max(-0.85, Math.min(0.85, predictX));
+    const speed = cpu.difficulty * 0.12 * dt;
+    cpu.x += (clampedX - cpu.x) * speed;
+    cpu.x = Math.max(-0.9, Math.min(0.9, cpu.x));
+  } else {
+    // Ball going away — drift back to center
+    cpu.x += (0 - cpu.x) * 0.03 * dt;
+  }
+
+  // CPU hit: ball has crossed into CPU's half and is still moving toward CPU end
+  // Use a generous z window and no height restriction — CPU just returns it
+  if (ball.z >= 0.78 && ball.vz > 0 && cpuHitCooldown <= 0) {
+    cpuHitCooldown = 25;
+
+    const err = (1 - cpu.difficulty) * (Math.random() - 0.5) * 0.4;
+    ball.vz = -(0.020 + Math.random() * 0.008); // send back to player
+    ball.vx = -ball.x * 0.3 + (Math.random() - 0.5) * 0.018 + err;
+    ball.vy = 0.014 + Math.random() * 0.008;
+    ball.spin = (Math.random() - 0.5) * 0.010;
+    // Snap ball to CPU's position so it looks like a real hit
+    ball.x = cpu.x;
+    ball.z = 0.88;
+    ball.y = Math.max(ball.y, 0.02);
+
+    const bs = ballScreen();
+    spawnHitParticles(bs.sx, bs.sy, '#ff8c60');
+  }
+}
+
+// --- Physics ---
+function updateBall(dt) {
+  if (gameState !== 'rally') return;
+
+  ball.vy -= 0.0006 * dt; // gravity
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+  ball.z += ball.vz * dt;
+  ball.vx += ball.spin * dt * 0.1;
+
+  // Air resistance
+  ball.vx *= Math.pow(0.999, dt);
+  ball.vz *= Math.pow(0.999, dt);
+
+  // Table bounce (y=0 is table surface)
+  if (ball.y <= 0 && ball.z > 0 && ball.z < 1) {
+    ball.y = 0;
+    ball.vy = Math.abs(ball.vy) * 0.72;
+    ball.vx *= 0.92;
+    ball.spin *= 0.8;
+
+    const bs = ballScreen();
+    spawnHitParticles(bs.sx, bs.sy, '#ffffff');
+
+    if (ball.vz < 0) {
+      // Bounce on player's side (ball heading back toward player)
+      ball.bounced = true;
+      canHit = true;
+    }
+  }
+
+  // Net (z=0.5)
+  if (Math.abs(ball.z - 0.5) < 0.012 && ball.y < 0.07) {
+    const bs = ballScreen();
+    spawnHitParticles(bs.sx, bs.sy, '#ffdd44');
+    // Ball was going toward CPU but hit net → CPU gets point (player faulted)
+    if (ball.vz > 0) {
+      cpuScore++;
+    } else {
+      playerScore++;
+    }
+    updateScore();
+    pointEnd(ball.vz > 0 ? 'cpu' : 'player');
+    return;
+  }
+
+  // Off table sides or fell below table
+  if (Math.abs(ball.x) > 1.2 || ball.y < -0.2) {
+    // Whoever last hit it (or whose side it's on) loses the point
+    if (ball.vz > 0) {
+      // Was heading to CPU — player hit it out
+      cpuScore++;
+      updateScore();
+      pointEnd('cpu');
+    } else {
+      // Was heading to player — CPU hit it out
+      playerScore++;
+      updateScore();
+      pointEnd('player');
+    }
+    return;
+  }
+
+  // Ball off player end — player missed/didn't return
+  if (ball.z < -0.05 && ball.vz < 0) {
+    cpuScore++;
+    updateScore();
+    pointEnd('cpu');
+    return;
+  }
+
+  // Ball off CPU end — CPU missed
+  if (ball.z > 1.08 && ball.vz > 0) {
+    playerScore++;
+    updateScore();
+    pointEnd('player');
+    return;
+  }
+
+  // Update CPU
+  updateCPU(dt);
+}
+
+function pointEnd(loser) {
+  gameState = 'point';
+  canHit = false;
+  const winner = loser === 'cpu' ? 'player' : 'cpu';
+
+  setTimeout(() => {
+    if (playerScore >= 11 && playerScore - cpuScore >= 2) {
+      showMessage('🏆 YOU WIN!\nClick to play again');
+      gameState = 'gameover';
+      playerScore = 0; cpuScore = 0; updateScore();
+      servingPlayer = 'player';
+    } else if (cpuScore >= 11 && cpuScore - playerScore >= 2) {
+      showMessage('😅 CPU WINS\nClick to play again');
+      gameState = 'gameover';
+      playerScore = 0; cpuScore = 0; updateScore();
+      servingPlayer = 'cpu';
+    } else {
+      servingPlayer = winner === 'player' ? 'cpu' : 'player'; // loser serves
+      gameState = 'serve';
+      serve();
+    }
+  }, 800);
+}
+
+// --- Draw ---
+function drawTable() {
+  const pNear = project(-1, 0, 0);
+  const pFar = project(-1, 0, 1);
+  const pFarR = project(1, 0, 1);
+  const pNearR = project(1, 0, 0);
+
+  // Table surface
+  const grad = ctx.createLinearGradient(W/2, pNear.sy, W/2, pFar.sy);
+  grad.addColorStop(0, '#0d3a2a');
+  grad.addColorStop(0.5, '#0f4a35');
+  grad.addColorStop(1, '#0d3a2a');
+
+  ctx.beginPath();
+  ctx.moveTo(pNear.sx, pNear.sy);
+  ctx.lineTo(pFar.sx, pFar.sy);
+  ctx.lineTo(pFarR.sx, pFarR.sy);
+  ctx.lineTo(pNearR.sx, pNearR.sy);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Table glow
+  if (glowPulse > 0) {
+    ctx.save();
+    ctx.globalAlpha = glowPulse * 0.3;
+    ctx.fillStyle = '#00ff88';
+    ctx.fill();
+    ctx.restore();
+    glowPulse *= 0.92;
+  }
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,200,100,0.15)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 6; i++) {
+    const z = i / 6;
+    const l = project(-1, 0, z);
+    const r = project(1, 0, z);
+    ctx.beginPath(); ctx.moveTo(l.sx, l.sy); ctx.lineTo(r.sx, r.sy); ctx.stroke();
+  }
+  for (let i = 1; i < 4; i++) {
+    const x = (i / 4) * 2 - 1;
+    const near = project(x, 0, 0);
+    const far = project(x, 0, 1);
+    ctx.beginPath(); ctx.moveTo(near.sx, near.sy); ctx.lineTo(far.sx, far.sy); ctx.stroke();
+  }
+
+  // Table outline
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(pNear.sx, pNear.sy);
+  ctx.lineTo(pFar.sx, pFar.sy);
+  ctx.lineTo(pFarR.sx, pFarR.sy);
+  ctx.lineTo(pNearR.sx, pNearR.sy);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Center line
+  const cl = project(-1, 0, 0.5);
+  const cr = project(1, 0, 0.5);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath(); ctx.moveTo(cl.sx, cl.sy); ctx.lineTo(cr.sx, cr.sy); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Net
+  const netL = project(-1, 0, 0.5);
+  const netR = project(1, 0, 0.5);
+  const netH = 0.065;
+  const netTL = project(-1, netH, 0.5);
+  const netTR = project(1, netH, 0.5);
+
+  const netGrad = ctx.createLinearGradient(netL.sx, netL.sy, netTL.sx, netTL.sy);
+  netGrad.addColorStop(0, 'rgba(200,200,200,0.6)');
+  netGrad.addColorStop(1, 'rgba(200,200,200,0.15)');
+
+  ctx.strokeStyle = netGrad;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(netL.sx, netL.sy); ctx.lineTo(netTL.sx, netTL.sy);
+  ctx.moveTo(netR.sx, netR.sy); ctx.lineTo(netTR.sx, netTR.sy);
+  ctx.moveTo(netTL.sx, netTL.sy); ctx.lineTo(netTR.sx, netTR.sy);
+  ctx.stroke();
+
+  // Net mesh
+  ctx.strokeStyle = 'rgba(180,180,180,0.25)';
+  ctx.lineWidth = 0.8;
+  for (let i = 1; i < 8; i++) {
+    const t = i / 8;
+    const bx = netL.sx + (netR.sx - netL.sx) * t;
+    const by = netL.sy + (netR.sy - netL.sy) * t;
+    const tx = netTL.sx + (netTR.sx - netTL.sx) * t;
+    const ty = netTL.sy + (netTR.sy - netTL.sy) * t;
+    ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(tx, ty); ctx.stroke();
+  }
+  for (let i = 0; i < 4; i++) {
+    const t = i / 3;
+    const lx = netL.sx + (netTL.sx - netL.sx) * t;
+    const ly = netL.sy + (netTL.sy - netL.sy) * t;
+    const rx = netR.sx + (netTR.sx - netR.sx) * t;
+    const ry = netR.sy + (netTR.sy - netR.sy) * t;
+    ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(rx, ry); ctx.stroke();
+  }
+}
+
+function drawCPUPaddle() {
+  const pos = project(cpu.x, 0.05, 0.92);
+  const s = pos.scale;
+
+  ctx.save();
+  ctx.translate(pos.sx, pos.sy);
+
+  // Paddle face
+  ctx.fillStyle = '#cc2222';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 30 * s, 20 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2 * s;
+  ctx.stroke();
+
+  // Handle
+  ctx.fillStyle = '#7a4a1a';
+  ctx.fillRect(-5 * s, 18 * s, 10 * s, 20 * s);
+
+  ctx.restore();
+}
+
+function drawBall() {
+  if (!ball.visible) return;
+  const { sx, sy, scale } = ballScreen();
+  const r = ball.radius * W * 0.5 * scale * 1.6;
+
+  // Shadow on table
+  const shadow = project(ball.x, 0, ball.z);
+  const shadowSize = Math.max(0, r * (1 - ball.y * 2));
+  ctx.beginPath();
+  ctx.ellipse(shadow.sx, shadow.sy, Math.max(0.01, shadowSize * 1.5), Math.max(0.01, shadowSize * 0.5), 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fill();
+
+  // Trail
+  trail.forEach((t, i) => {
+    const alpha = (i / trail.length) * 0.4;
+    const tr = r * (i / trail.length) * 0.7;
+    ctx.beginPath();
+    ctx.arc(t.sx, t.sy, tr, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,200,150,${alpha})`;
+    ctx.fill();
+  });
+
+  // Ball
+  const ballGrad = ctx.createRadialGradient(sx - r*0.3, sy - r*0.3, r*0.1, sx, sy, r);
+  ballGrad.addColorStop(0, '#fff8f0');
+  ballGrad.addColorStop(0.5, '#f4e0c8');
+  ballGrad.addColorStop(1, '#e8c090');
+
+  ctx.beginPath();
+  ctx.arc(sx, sy, r, 0, Math.PI * 2);
+  ctx.fillStyle = ballGrad;
+  ctx.fill();
+
+  // Shine
+  ctx.beginPath();
+  ctx.arc(sx - r*0.3, sy - r*0.35, r * 0.28, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.fill();
+}
+
+function drawPaddle() {
+  const bsY = ballScreen().sy;
+  paddle.x += (mouseX - paddle.x) * 0.2;
+  paddle.y = H * 0.82 + (mouseY - H*0.5) * 0.08;
+
+  const tiltTarget = (mouseX - W/2) / W * 0.4;
+  paddle.tilt += (tiltTarget - paddle.tilt) * 0.15;
+
+  ctx.save();
+  ctx.translate(paddle.x, paddle.y);
+  ctx.rotate(paddle.tilt);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(5, 8, 46, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Handle
+  ctx.fillStyle = '#7a4a1a';
+  ctx.beginPath();
+  ctx.roundRect(-7, 28, 14, 38, 5);
+  ctx.fill();
+
+  // Paddle face (rubber)
+  const pgGrad = ctx.createRadialGradient(-10, -15, 5, 0, 0, 50);
+  pgGrad.addColorStop(0, '#333');
+  pgGrad.addColorStop(1, '#111');
+
+  ctx.fillStyle = pgGrad;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 44, 36, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Red side
+  const prGrad = ctx.createRadialGradient(-8, -10, 5, 0, 0, 44);
+  prGrad.addColorStop(0, '#e83030');
+  prGrad.addColorStop(0.7, '#c01515');
+  prGrad.addColorStop(1, '#8a0a0a');
+
+  ctx.fillStyle = prGrad;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 40, 32, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Shine
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.beginPath();
+  ctx.ellipse(-10, -10, 18, 12, -0.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Edge
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 40, 32, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Hit indicator
+  if (canHit && ball.z < 0.25) {
+    const d = Math.sqrt(Math.pow(mouseX - paddle.x, 2) + Math.pow(mouseY - bsY, 2));
+    const alpha = Math.max(0, 1 - d / 90);
+    ctx.strokeStyle = `rgba(100,255,180,${alpha * 0.8})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 44, 36, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fillStyle = p.color.replace(')', `,${p.life})`).replace('rgb', 'rgba');
+    ctx.globalAlpha = p.life;
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawBackground() {
+  // Dark arena
+  const bgGrad = ctx.createRadialGradient(W/2, H*0.4, 0, W/2, H*0.4, W*0.8);
+  bgGrad.addColorStop(0, '#1a1a2e');
+  bgGrad.addColorStop(0.5, '#0d0d1a');
+  bgGrad.addColorStop(1, '#050508');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Ambient floor glow
+  const floorGrad = ctx.createRadialGradient(W/2, H*0.68, 0, W/2, H*0.68, W*0.5);
+  floorGrad.addColorStop(0, 'rgba(0,150,80,0.08)');
+  floorGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = floorGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Ceiling light
+  const ceilGrad = ctx.createRadialGradient(W/2, 0, 0, W/2, 0, W*0.5);
+  ceilGrad.addColorStop(0, 'rgba(100,150,255,0.06)');
+  ceilGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = ceilGrad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// --- Main loop ---
+let last = 0;
+function loop(ts) {
+  const dt = Math.min((ts - last) / 16.67, 3);
+  last = ts;
+
+  // Update
+  if (hitCooldown > 0) hitCooldown -= dt;
+
+  // Trail
+  if (gameState === 'rally') {
+    const bs = ballScreen();
+    trail.push({ sx: bs.sx, sy: bs.sy });
+    if (trail.length > MAX_TRAIL) trail.shift();
+  } else {
+    if (trail.length > 0) trail.shift();
+  }
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.1;
+    p.life -= 0.04;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  updateBall(dt);
+
+  // Draw
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+  drawTable();
+  drawCPUPaddle();
+  drawBall();
+  drawParticles();
+  drawPaddle();
+
+  requestAnimationFrame(loop);
+}
+
+// --- Input ---
+canvas.addEventListener('mousemove', e => {
+  mouseX = e.clientX;
+  mouseY = e.clientY;
+});
+
+canvas.addEventListener('click', () => {
+  if (gameState === 'serve' && servingPlayer === 'player') {
+    // Launch serve toward CPU (positive vz)
+    ball.vz = 0.020 + Math.random() * 0.004;
+    ball.vx = (mouseX - W/2) / W * 0.022;
+    ball.vy = 0.018;
+    ball.spin = (mouseX - W/2) / W * 0.010;
+    gameState = 'rally';
+    canHit = false;
+    hideMessage();
+  } else if (gameState === 'rally') {
+    playerHit();
+  } else if (gameState === 'gameover') {
+    gameState = 'serve';
+    serve();
+  }
+});
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  mouseX = e.touches[0].clientX;
+  mouseY = e.touches[0].clientY;
+}, { passive: false });
+
+canvas.addEventListener('touchstart', e => {
+  mouseX = e.touches[0].clientX;
+  mouseY = e.touches[0].clientY;
+  canvas.dispatchEvent(new MouseEvent('click'));
+});
+
+window.addEventListener('resize', () => {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+});
+
+// Start
+serve();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
