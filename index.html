@@ -51,10 +51,19 @@
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
 
-const W = canvas.width, H = canvas.height;
+function resizeCanvas() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resizeCanvas();
+
+let W, H;
+function updateDimensions() {
+  W = canvas.width;
+  H = canvas.height;
+}
+updateDimensions();
 
 // Game state
 let playerScore = 0, cpuScore = 0;
@@ -107,17 +116,25 @@ const particles = [];
 let glowPulse = 0;
 
 // --- Coordinate helpers ---
+// wz: 0 = player's end (near, bottom of screen, WIDE)
+//     1 = CPU's end   (far,  top of screen,    NARROW)
 function project(wx, wy, wz) {
-  // wz: 0=player end, 1=cpu end
-  // Perspective: table goes from bottom-center to upper-center
-  const perspective = 0.55 + wz * 0.45;
-  const tableLeft = W * (0.5 - 0.45 * perspective);
-  const tableRight = W * (0.5 + 0.45 * perspective);
-  const tableY = H * (TABLE_Z_NEAR + (TABLE_Z_FAR - TABLE_Z_NEAR) * (1 - wz));
+  // Perspective scale: large near player, small near CPU
+  const scale = 1.0 - wz * 0.62;  // 1.0 at player end → 0.38 at CPU end
+
+  // Table width on screen
+  const halfW  = W * 0.42 * scale;
+  const tableLeft  = W * 0.5 - halfW;
+  const tableRight = W * 0.5 + halfW;
+
+  // Table Y: player end near bottom, CPU end near top
+  const tableNearY = H * 0.82;   // player's near edge
+  const tableFarY  = H * 0.18;   // CPU's far edge
+  const tableY = tableNearY + (tableFarY - tableNearY) * wz;
 
   const sx = tableLeft + (wx + 1) / 2 * (tableRight - tableLeft);
-  const sy = tableY - wy * H * 0.25 * perspective;
-  return { sx, sy, scale: perspective };
+  const sy = tableY - wy * H * 0.28 * scale;
+  return { sx, sy, scale };
 }
 
 function ballScreen() {
@@ -702,8 +719,8 @@ canvas.addEventListener('touchstart', e => {
 });
 
 window.addEventListener('resize', () => {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  resizeCanvas();
+  updateDimensions();
 });
 
 // Start
