@@ -44,7 +44,7 @@
 <div id="ui">
   <div id="score">0 : 0</div>
   <div id="message"></div>
-  <div id="instructions">MOVE MOUSE TO AIM · CLICK TO HIT</div>
+  <div id="instructions">MOVE YOUR BAT TO HIT THE BALL</div>
   <div id="difficulty">CPU: MEDIUM</div>
 </div>
 
@@ -127,18 +127,19 @@ function ballScreen() {
 // --- Serve ---
 function serve() {
   ball.bounced = false;
+  trail.length = 0;
   if (servingPlayer === 'player') {
-    ball.x = 0; ball.y = 0.25; ball.z = 0.05;
+    ball.x = 0; ball.y = 0.08; ball.z = 0.12;
     ball.vx = 0; ball.vy = 0; ball.vz = 0;
     canHit = true;
-    showMessage('YOUR SERVE\nClick to serve!');
+    showMessage('YOUR SERVE\nMove bat to the ball to serve!');
   } else {
-    ball.x = (Math.random() - 0.5) * 0.6;
-    ball.y = 0.3; ball.z = 0.92;
-    ball.vx = (Math.random() - 0.5) * 0.018;
-    ball.vy = -0.004;
-    ball.vz = -0.018 - Math.random() * 0.008;
-    ball.spin = (Math.random() - 0.5) * 0.01;
+    ball.x = (Math.random() - 0.5) * 0.5;
+    ball.y = 0.15; ball.z = 0.88;
+    ball.vx = (Math.random() - 0.5) * 0.012;
+    ball.vy = -0.002;
+    ball.vz = -0.020 - Math.random() * 0.006;
+    ball.spin = (Math.random() - 0.5) * 0.008;
     canHit = false;
     hideMessage();
     gameState = 'rally';
@@ -157,30 +158,33 @@ function updateScore() {
   document.getElementById('score').textContent = playerScore + ' : ' + cpuScore;
 }
 
-// --- Hit ball with paddle ---
-function playerHit() {
-  if (!canHit || hitCooldown > 0) return;
-  if (ball.z > 0.25) return; // too far
+// --- Hit ball with paddle (called every frame) ---
+function checkPlayerHit() {
+  if (hitCooldown > 0) return;
+  if (gameState !== 'rally' && gameState !== 'serve') return;
+  // Only hit when ball is on player's side (z < 0.5) and moving toward or at player
+  if (ball.z > 0.45) return;
 
   const bs = ballScreen();
-  const dx = mouseX - paddle.x;
-  const dy = mouseY - bs.sy;
-  const dist = Math.sqrt(dx*dx + dy*dy);
-  if (dist > 90) return; // missed
+  const dx = paddle.x - bs.sx;
+  const dy = paddle.y - bs.sy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist > 55) return; // not close enough
 
-  hitCooldown = 18;
+  hitCooldown = 22;
   canHit = false;
   hideMessage();
 
-  // Direction based on mouse position relative to center
-  const aimX = (mouseX - W/2) / (W/2);
-  const aimY = (mouseY - H*0.5) / (H*0.5);
+  // Aim direction based on where paddle is on screen
+  const aimX = (paddle.x - W / 2) / (W / 2);
+  const aimY = (paddle.y - H * 0.55) / (H * 0.4);
 
-  ball.vz = 0.022 + Math.random() * 0.006;   // positive = toward CPU
-  ball.vx = aimX * 0.022 + (Math.random() - 0.5) * 0.004;
-  ball.vy = 0.016 - aimY * 0.006;
-  ball.spin = aimX * 0.010;
+  ball.vz = 0.024 + Math.random() * 0.004; // enough pace to reach CPU
+  ball.vx = aimX * 0.020 + (Math.random() - 0.5) * 0.003;
+  ball.vy = 0.020 - aimY * 0.004; // generous upward arc to clear net
+  ball.spin = aimX * 0.008;
   ball.bounced = false;
+  ball.z = 0.10; // reset to player side
 
   spawnHitParticles(bs.sx, bs.sy, '#80cfff');
   glowPulse = 1;
@@ -208,33 +212,45 @@ let cpuHitCooldown = 0;
 function updateCPU(dt) {
   if (cpuHitCooldown > 0) cpuHitCooldown -= dt;
 
-  // Ball travelling toward CPU (vz > 0) — track predicted landing spot
   if (ball.vz > 0) {
-    const timeToReach = Math.max(0, (0.88 - ball.z) / ball.vz);
-    const predictX = ball.x + ball.vx * timeToReach;
-    const clampedX = Math.max(-0.85, Math.min(0.85, predictX));
-    const speed = cpu.difficulty * 0.12 * dt;
-    cpu.x += (clampedX - cpu.x) * speed;
-    cpu.x = Math.max(-0.9, Math.min(0.9, cpu.x));
+    // Predict bounce landing position on CPU side
+    let predictX = ball.x;
+    if (ball.vy < 0 && ball.y > 0) {
+      const timeToBounce = ball.y / (-ball.vy);
+      predictX = ball.x + ball.vx * timeToBounce;
+    }
+    predictX = Math.max(-0.85, Math.min(0.85, predictX));
+    // Track fast enough to get there, but not instant
+    const trackSpeed = Math.min(0.22 * dt, 1);
+    cpu.x += (predictX - cpu.x) * trackSpeed;
+    cpu.x = Math.max(-0.88, Math.min(0.88, cpu.x));
   } else {
-    // Ball going away — drift back to center
-    cpu.x += (0 - cpu.x) * 0.03 * dt;
+    cpu.x += (0 - cpu.x) * 0.015 * dt;
   }
 
-  // CPU hit: ball has crossed into CPU's half and is still moving toward CPU end
-  // Use a generous z window and no height restriction — CPU just returns it
-  if (ball.z >= 0.78 && ball.vz > 0 && cpuHitCooldown <= 0) {
-    cpuHitCooldown = 25;
+  // Hit conditions:
+  // - Ball on CPU side, moving toward CPU
+  // - Ball height is hittable: between 0 and 0.25 (not sky-high)
+  // - CPU paddle is within reach horizontally (generous: 0.35)
+  const onCPUSide   = ball.z > 0.58 && ball.z < 0.98 && ball.vz > 0;
+  const hittable    = ball.y >= 0 && ball.y <= 0.25;
+  const inReach     = Math.abs(ball.x - cpu.x) < 0.35;
 
-    const err = (1 - cpu.difficulty) * (Math.random() - 0.5) * 0.4;
-    ball.vz = -(0.020 + Math.random() * 0.008); // send back to player
-    ball.vx = -ball.x * 0.3 + (Math.random() - 0.5) * 0.018 + err;
-    ball.vy = 0.014 + Math.random() * 0.008;
-    ball.spin = (Math.random() - 0.5) * 0.010;
-    // Snap ball to CPU's position so it looks like a real hit
-    ball.x = cpu.x;
-    ball.z = 0.88;
-    ball.y = Math.max(ball.y, 0.02);
+  if (onCPUSide && hittable && inReach && cpuHitCooldown <= 0) {
+    cpuHitCooldown = 28;
+
+    const strategy = Math.random();
+    let targetX = strategy < 0.4 ? -0.4 + Math.random() * 0.2
+                : strategy < 0.8 ?  0.2 + Math.random() * 0.2
+                :                  (Math.random() - 0.5) * 0.15;
+    targetX += (1 - cpu.difficulty) * (Math.random() - 0.5) * 0.2;
+
+    ball.vz  = -(0.022 + Math.random() * 0.005);
+    ball.vx  = targetX * 0.018;
+    ball.vy  = 0.017 + Math.random() * 0.006;
+    ball.spin = targetX * 0.008 + (Math.random() - 0.5) * 0.005;
+    ball.z   = Math.min(ball.z, 0.90);
+    ball.y   = Math.max(ball.y, 0.02);
 
     const bs = ballScreen();
     spawnHitParticles(bs.sx, bs.sy, '#ff8c60');
@@ -245,28 +261,28 @@ function updateCPU(dt) {
 function updateBall(dt) {
   if (gameState !== 'rally') return;
 
-  ball.vy -= 0.0006 * dt; // gravity
+  ball.vy -= 0.00085 * dt; // gravity
   ball.x += ball.vx * dt;
   ball.y += ball.vy * dt;
   ball.z += ball.vz * dt;
-  ball.vx += ball.spin * dt * 0.1;
+  ball.vx += ball.spin * dt * 0.08;
 
-  // Air resistance
-  ball.vx *= Math.pow(0.999, dt);
-  ball.vz *= Math.pow(0.999, dt);
+  // Very light air resistance — keep pace throughout rally
+  ball.vx *= Math.pow(0.9995, dt);
+  ball.vz *= Math.pow(0.9995, dt);
 
   // Table bounce (y=0 is table surface)
-  if (ball.y <= 0 && ball.z > 0 && ball.z < 1) {
-    ball.y = 0;
-    ball.vy = Math.abs(ball.vy) * 0.72;
-    ball.vx *= 0.92;
-    ball.spin *= 0.8;
+  if (ball.y <= 0 && ball.z > 0.02 && ball.z < 0.98) {
+    ball.y = 0.001;
+    ball.vy = Math.abs(ball.vy) * 0.78; // bouncy enough to reach far end
+    ball.vx *= 0.94;
+    ball.spin *= 0.75;
 
     const bs = ballScreen();
     spawnHitParticles(bs.sx, bs.sy, '#ffffff');
 
     if (ball.vz < 0) {
-      // Bounce on player's side (ball heading back toward player)
+      // Bounced on player's side — player can now hit it
       ball.bounced = true;
       canHit = true;
     }
@@ -457,7 +473,9 @@ function drawTable() {
 }
 
 function drawCPUPaddle() {
-  const pos = project(cpu.x, 0.05, 0.92);
+  // Show paddle at ball height when ball is on CPU side, otherwise resting on table
+  const cpuY = (ball.vz > 0 && ball.z > 0.5) ? Math.max(0.04, ball.y + 0.03) : 0.05;
+  const pos = project(cpu.x, cpuY, 0.88);
   const s = pos.scale;
 
   ctx.save();
@@ -521,9 +539,9 @@ function drawBall() {
 }
 
 function drawPaddle() {
-  const bsY = ballScreen().sy;
-  paddle.x += (mouseX - paddle.x) * 0.2;
-  paddle.y = H * 0.82 + (mouseY - H*0.5) * 0.08;
+  // Paddle follows cursor directly — no smoothing lag
+  paddle.x = mouseX;
+  paddle.y = mouseY;
 
   const tiltTarget = (mouseX - W/2) / W * 0.4;
   paddle.tilt += (tiltTarget - paddle.tilt) * 0.15;
@@ -577,17 +595,6 @@ function drawPaddle() {
   ctx.beginPath();
   ctx.ellipse(0, 0, 40, 32, 0, 0, Math.PI * 2);
   ctx.stroke();
-
-  // Hit indicator
-  if (canHit && ball.z < 0.25) {
-    const d = Math.sqrt(Math.pow(mouseX - paddle.x, 2) + Math.pow(mouseY - bsY, 2));
-    const alpha = Math.max(0, 1 - d / 90);
-    ctx.strokeStyle = `rgba(100,255,180,${alpha * 0.8})`;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 44, 36, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  }
 
   ctx.restore();
 }
@@ -655,6 +662,7 @@ function loop(ts) {
   }
 
   updateBall(dt);
+  checkPlayerHit();
 
   // Draw
   ctx.clearRect(0, 0, W, H);
@@ -675,18 +683,7 @@ canvas.addEventListener('mousemove', e => {
 });
 
 canvas.addEventListener('click', () => {
-  if (gameState === 'serve' && servingPlayer === 'player') {
-    // Launch serve toward CPU (positive vz)
-    ball.vz = 0.020 + Math.random() * 0.004;
-    ball.vx = (mouseX - W/2) / W * 0.022;
-    ball.vy = 0.018;
-    ball.spin = (mouseX - W/2) / W * 0.010;
-    gameState = 'rally';
-    canHit = false;
-    hideMessage();
-  } else if (gameState === 'rally') {
-    playerHit();
-  } else if (gameState === 'gameover') {
+  if (gameState === 'gameover') {
     gameState = 'serve';
     serve();
   }
